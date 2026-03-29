@@ -1,0 +1,11 @@
+config.json
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+*.log
+leads.db
+agent-runtime/outputs/pdfs/
+agent-runtime/shared/audits.json
+agent-runtime/shared/outreach.json
+fonts/

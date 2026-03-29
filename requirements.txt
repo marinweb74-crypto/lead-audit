@@ -1,0 +1,8 @@
+playwright==1.49.1
+anthropic>=0.40.0
+telethon>=1.37.0
+aiogram>=3.13.0
+aiohttp>=3.11.0
+reportlab>=4.2.0
+transliterate>=1.10.2
+requests>=2.32.0
