@@ -1,0 +1,69 @@
+{
+  "telegram_bot_token": "YOUR_BOT_TOKEN",
+  "telegram_user_id": 1381392950,
+  "telethon": {
+    "api_id": 33368809,
+    "api_hash": "3dc0cb001adb711629bf8fef2c591cb7",
+    "phone": "+79936764594",
+    "session_name": "lead_audit_session"
+  },
+  "smtp": {
+    "server": "smtp.mail.ru",
+    "port": 465,
+    "email": "stunagncy@mail.ru",
+    "password": "qznXcf49l9C9Y2Cj4nm1",
+    "from_name": "STUN Agency"
+  },
+  "gemini_api_keys": [
+    "AIzaSyAokRuq3_hp1HB99qZybDAe3bwbmB7h2FA",
+    "AIzaSyCKoZRELlxXH_PA-0iiK1CwO95EBlfY3Sc",
+    "AIzaSyAMoEyfUMOLi7SaFGeaYROT3WIwkr-Ly7Q"
+  ],
+  "gemini_api_key": "AIzaSyCKoZRELlxXH_PA-0iiK1CwO95EBlfY3Sc",
+  "gemini_model": "gemini-2.5-flash",
+  "brave_search_api_key": "BSATbgmyhJAQT9jI1nwVdPpo3hGw6Zb",
+  "cities": [
+    {"slug": "moscow", "name": "Москва"},
+    {"slug": "spb", "name": "Санкт-Петербург"},
+    {"slug": "novosibirsk", "name": "Новосибирск"},
+    {"slug": "ekaterinburg", "name": "Екатеринбург"},
+    {"slug": "kazan", "name": "Казань"},
+    {"slug": "nizhniy_novgorod", "name": "Нижний Новгород"},
+    {"slug": "samara", "name": "Самара"},
+    {"slug": "chelyabinsk", "name": "Челябинск"},
+    {"slug": "ufa", "name": "Уфа"},
+    {"slug": "rostov-na-donu", "name": "Ростов-на-Дону"},
+    {"slug": "krasnoyarsk", "name": "Красноярск"},
+    {"slug": "perm", "name": "Пермь"},
+    {"slug": "volgograd", "name": "Волгоград"},
+    {"slug": "krasnodar", "name": "Краснодар"},
+    {"slug": "saratov", "name": "Саратов"},
+    {"slug": "tolyatti", "name": "Тольятти"},
+    {"slug": "yaroslavl", "name": "Ярославль"},
+    {"slug": "irkutsk", "name": "Иркутск"},
+    {"slug": "habarovsk", "name": "Хабаровск"},
+    {"slug": "vladivostok", "name": "Владивосток"},
+    {"slug": "orenburg", "name": "Оренбург"},
+    {"slug": "tomsk", "name": "Томск"},
+    {"slug": "kemerovo", "name": "Кемерово"},
+    {"slug": "astrakhan", "name": "Астрахань"},
+    {"slug": "naberezhnye_chelny", "name": "Набережные Челны"},
+    {"slug": "penza", "name": "Пенза"},
+    {"slug": "lipetsk", "name": "Липецк"},
+    {"slug": "kirov", "name": "Киров"}
+  ],
+  "categories": [
+    "Шиномонтаж",
+    "Клининг",
+    "Автосервис",
+    "Ремонт телефонов",
+    "Массаж"
+  ],
+  "leads_per_category": 30,
+  "max_pages": 5,
+  "send_delay_min": 30,
+  "send_delay_max": 60,
+  "max_daily_sends": 50,
+  "max_touches": 3,
+  "touch_interval_days": 3
+}
