@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/lead-audit
-ExecStart=/usr/bin/python3 /root/lead-audit/bot.py
+ExecStart=/root/lead-audit/venv/bin/python /root/lead-audit/bot.py
 Restart=always
 RestartSec=10
 
