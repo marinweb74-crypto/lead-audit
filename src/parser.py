@@ -1,5 +1,7 @@
 """
-Parser: собирает компании из 2ГИС через Places API.
+Parser: собирает компании из 2ГИС.
+- API для быстрого получения списка фирм (rating, reviews)
+- HTML-страница фирмы для контактов (phone, email, website)
 Фильтрует: с сайтом, сетевые бренды, без контактов, дубли с blacklist.
 """
 
@@ -28,8 +30,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 API_URL = "https://catalog.api.2gis.com/3.0/items"
+FIRM_URL = "https://2gis.ru/{city_slug}/firm/{firm_id}"
 
-# 2GIS region IDs
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
+
 REGION_IDS = {
     "moscow": 32, "spb": 2, "novosibirsk": 1, "ekaterinburg": 7,
     "kazan": 12, "nizhniy_novgorod": 22, "samara": 24, "chelyabinsk": 30,
@@ -96,42 +104,52 @@ def is_known_chain(name: str) -> bool:
     return any(chain in name_lower for chain in KNOWN_CHAINS)
 
 
-def _extract_contacts(item: dict) -> dict:
-    """Extract phone, email, website from 2GIS API item."""
-    result = {"phone": "", "email": "", "has_website": False}
-
-    for group in item.get("contact_groups", []):
-        for contact in group.get("contacts", []):
-            ctype = contact.get("type", "")
-            value = contact.get("value", "")
-
-            if ctype == "phone" and not result["phone"]:
-                # Clean phone: keep only digits and +
-                cleaned = re.sub(r"[^\d+]", "", value)
-                result["phone"] = cleaned
-
-            elif ctype == "email" and not result["email"]:
-                result["email"] = value.lower().strip()
-
-            elif ctype == "website":
-                url = value.lower()
-                if not any(d in url for d in IGNORE_DOMAINS):
-                    result["has_website"] = True
-
-    return result
-
-
 def _extract_rating(item: dict) -> tuple:
-    """Extract rating and review count from 2GIS API item."""
     reviews_data = item.get("reviews", {})
     rating = reviews_data.get("general_rating")
     review_count = reviews_data.get("general_review_count", 0)
     return rating, review_count
 
 
+def _fetch_contacts_from_html(city_slug: str, firm_id: str, session: requests.Session) -> dict:
+    """Fetch phone, email, website from 2GIS firm page HTML."""
+    result = {"phone": "", "email": "", "has_website": False}
+
+    url = FIRM_URL.format(city_slug=city_slug, firm_id=firm_id)
+    try:
+        resp = session.get(url, timeout=10)
+        if resp.status_code != 200:
+            return result
+        html = resp.text
+
+        phones = re.findall(r'tel:([+\d\-() ]+)', html)
+        if phones:
+            cleaned = re.sub(r"[^\d+]", "", phones[0])
+            if len(cleaned) >= 10:
+                result["phone"] = cleaned
+
+        emails = re.findall(r'mailto:([^"&]+)', html)
+        if emails:
+            result["email"] = emails[0].lower().strip()
+
+        # Check for real website links (not aggregators)
+        site_pattern = r'href="(https?://[^"]+)"[^>]*(?:class="[^"]*website|data-testid="[^"]*website)'
+        sites = re.findall(site_pattern, html)
+        if not sites:
+            sites = re.findall(r'"website":\s*"(https?://[^"]+)"', html)
+        for site_url in sites:
+            if not any(d in site_url.lower() for d in IGNORE_DOMAINS):
+                result["has_website"] = True
+                break
+
+    except Exception as e:
+        log.debug("Failed to fetch contacts for %s: %s", firm_id, e)
+
+    return result
+
+
 def _search_2gis(api_key: str, query: str, region_id: int,
                  page: int = 1, page_size: int = 50) -> dict | None:
-    """Call 2GIS Places API."""
     params = {
         "key": api_key,
         "q": query,
@@ -139,7 +157,7 @@ def _search_2gis(api_key: str, query: str, region_id: int,
         "type": "branch",
         "page": page,
         "page_size": page_size,
-        "fields": "items.contact_groups,items.reviews",
+        "fields": "items.reviews",
         "sort": "relevance",
     }
 
@@ -161,16 +179,14 @@ def _search_2gis(api_key: str, query: str, region_id: int,
 
 def collect_from_api(api_key: str, city_slug: str, city_name: str,
                      category: str, max_items: int, max_pages: int = 10) -> dict:
-    """Collect leads from 2GIS API for a given city and category."""
     region_id = REGION_IDS.get(city_slug)
     if not region_id:
         log.warning("Unknown city slug: %s — skipping", city_slug)
         return _empty_stats()
 
-    stats = {"found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
-             "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
-             "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
-             "skipped_few_reviews": 0, "errors": 0}
+    stats = _empty_stats()
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
     for page_num in range(1, max_pages + 1):
         if stats["saved"] >= max_items:
@@ -213,7 +229,26 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
                 stats["skipped_dupe"] += 1
                 continue
 
-            contacts = _extract_contacts(item)
+            if is_known_chain(name):
+                stats["skipped_chain"] += 1
+                continue
+
+            rating, review_count = _extract_rating(item)
+
+            # Pre-filter by rating/reviews before fetching contacts
+            if rating is not None and rating < MIN_RATING:
+                stats["skipped_low_rating"] += 1
+                continue
+            if review_count < MIN_REVIEWS:
+                stats["skipped_few_reviews"] += 1
+                continue
+            if is_solo_business(name):
+                stats["skipped_solo"] += 1
+                continue
+
+            # Fetch contacts from HTML page
+            contacts = _fetch_contacts_from_html(city_slug, source_id, session)
+            time.sleep(0.3)
 
             if contacts["has_website"]:
                 stats["skipped_site"] += 1
@@ -221,21 +256,6 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
 
             if not contacts["phone"] and not contacts["email"]:
                 stats["skipped_no_contacts"] += 1
-                continue
-
-            if is_known_chain(name):
-                stats["skipped_chain"] += 1
-                continue
-
-            rating, review_count = _extract_rating(item)
-
-            passed, reason = passes_quality_filters(
-                name, rating, review_count, bool(contacts["phone"])
-            )
-            if not passed:
-                key = f"skipped_{reason}"
-                if key in stats:
-                    stats[key] += 1
                 continue
 
             saved = save_lead({
@@ -253,9 +273,9 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
                 stats["saved"] += 1
                 log.info("  NEW: %s | %s | %s | %s", name, contacts["phone"], city_name, category)
 
-        # Small delay between pages
         time.sleep(0.5)
 
+    session.close()
     return stats
 
 
