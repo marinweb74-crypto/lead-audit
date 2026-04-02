@@ -1,11 +1,17 @@
 config.json
+auth_session.py
 *.session
 *.session-journal
 __pycache__/
 *.pyc
 *.log
 leads.db
+leads.db-journal
 agent-runtime/outputs/pdfs/
 agent-runtime/shared/audits.json
 agent-runtime/shared/outreach.json
 fonts/
+blacklist.json
+*.pdf
+lead_audit_session*
+.env

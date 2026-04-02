@@ -6,6 +6,7 @@ LeadAudit Telegram Bot — управление парсингом и рассы
 /send — запуск рассылки
 /stats — статистика
 /stop — остановить текущий процесс
+/help — список команд
 """
 
 import asyncio
@@ -13,7 +14,6 @@ import json
 import logging
 import os
 import sys
-import signal
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
@@ -43,6 +43,7 @@ def is_authorized(message: Message) -> bool:
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     if not is_authorized(message):
+        await message.answer("У вас нет доступа к этому боту.")
         return
     stats = get_stats()
     await message.answer(
@@ -56,13 +57,30 @@ async def cmd_start(message: Message):
         "/parse — парсинг + аудиты (50 лидов)\n"
         "/send — рассылка\n"
         "/stats — статистика\n"
-        "/stop — остановить"
+        "/stop — остановить\n"
+        "/help — справка"
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    if not is_authorized(message):
+        await message.answer("У вас нет доступа к этому боту.")
+        return
+    await message.answer(
+        "<b>Команды:</b>\n\n"
+        "/start — статус и обзор\n"
+        "/parse — парсинг 2ГИС + обогащение + генерация аудитов\n"
+        "/send — запуск рассылки (Telegram + Email)\n"
+        "/stats — текущая статистика по базе\n"
+        "/stop — остановить текущий процесс"
     )
 
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     if not is_authorized(message):
+        await message.answer("У вас нет доступа к этому боту.")
         return
     stats = get_stats()
     await message.answer(
@@ -78,6 +96,7 @@ async def cmd_stats(message: Message):
 @router.message(Command("parse"))
 async def cmd_parse(message: Message):
     if not is_authorized(message):
+        await message.answer("У вас нет доступа к этому боту.")
         return
     global _current_task
     if _current_task and not _current_task.done():
@@ -90,19 +109,17 @@ async def cmd_parse(message: Message):
 
 async def _run_parse(message: Message):
     try:
-        # Step 1: Parse
         await message.answer("1/3 Парсинг 2ГИС...")
         from parser import run as run_parser
         stats_before = get_stats()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, run_parser, CONFIG)
 
         stats_after = get_stats()
         new = stats_after["total"] - stats_before["total"]
         await message.answer(f"Парсинг завершён. Новых лидов: {new}")
 
-        # Step 2: Enrich
         await message.answer("2/3 Обогащение данных...")
         from enricher import run as run_enricher
         await loop.run_in_executor(None, run_enricher, CONFIG)
@@ -110,7 +127,6 @@ async def _run_parse(message: Message):
         stats_after = get_stats()
         await message.answer(f"Обогащение завершено. Обогащено: {stats_after['enriched']}")
 
-        # Step 3: Audits
         await message.answer("3/3 Генерация аудитов...")
         from auditor import run as run_auditor
         await loop.run_in_executor(None, run_auditor, CONFIG)
@@ -126,13 +142,14 @@ async def _run_parse(message: Message):
     except asyncio.CancelledError:
         await message.answer("Процесс остановлен.")
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"Ошибка: {type(e).__name__}: {e}")
         log.exception("Parse error")
 
 
 @router.message(Command("send"))
 async def cmd_send(message: Message):
     if not is_authorized(message):
+        await message.answer("У вас нет доступа к этому боту.")
         return
     global _current_task
     if _current_task and not _current_task.done():
@@ -160,13 +177,14 @@ async def _run_send(message: Message):
     except asyncio.CancelledError:
         await message.answer("Рассылка остановлена.")
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"Ошибка: {type(e).__name__}: {e}")
         log.exception("Send error")
 
 
 @router.message(Command("stop"))
 async def cmd_stop(message: Message):
     if not is_authorized(message):
+        await message.answer("У вас нет доступа к этому боту.")
         return
     global _current_task
     if _current_task and not _current_task.done():

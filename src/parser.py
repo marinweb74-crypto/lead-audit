@@ -4,6 +4,8 @@ Parser: собирает компании из 2ГИС через Playwright.
 """
 
 import json
+import ipaddress
+import socket
 import time
 import logging
 import os
@@ -51,7 +53,6 @@ FREE_EMAIL_DOMAINS = [
     "list.ru", "rambler.ru", "hotmail.com", "outlook.com", "yahoo.com",
 ]
 
-# Quality filters
 MIN_RATING = 4.0
 MIN_REVIEWS = 5
 
@@ -88,18 +89,37 @@ def is_known_chain(name: str) -> bool:
     return any(chain in name_lower for chain in KNOWN_CHAINS)
 
 
+def _is_valid_email(email: str) -> bool:
+    if not email or not isinstance(email, str):
+        return False
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+
 def has_own_domain_email(email: str) -> bool:
-    if not email or "@" not in email:
+    if not _is_valid_email(email):
         return False
     domain = email.split("@")[1].lower()
     return domain not in FREE_EMAIL_DOMAINS
 
 
+def _is_private_ip(hostname: str) -> bool:
+    """Check if hostname resolves to a private/reserved IP."""
+    try:
+        ip_str = socket.gethostbyname(hostname)
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local
+    except (socket.gaierror, ValueError):
+        return True
+
+
 def verify_website_by_email_domain(email: str) -> bool:
-    if not email or "@" not in email:
+    if not _is_valid_email(email):
         return False
     domain = email.split("@")[1].lower()
     if domain in FREE_EMAIL_DOMAINS:
+        return False
+    if _is_private_ip(domain):
         return False
     try:
         resp = http_requests.head(f"https://{domain}", timeout=5, allow_redirects=True)
@@ -141,16 +161,14 @@ def read_contacts(page) -> dict:
 
     result["has_website"] = has_real_website(page)
 
-    # Try to get rating
     try:
         rating_el = page.query_selector('[class*="rating"] [class*="value"]')
         if rating_el:
             text = rating_el.inner_text().strip().replace(",", ".")
             result["rating"] = float(text)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Failed to parse rating: %s", e)
 
-    # Try to get review count
     try:
         review_el = page.query_selector('[class*="rating"] [class*="count"]')
         if review_el:
@@ -158,8 +176,8 @@ def read_contacts(page) -> dict:
             nums = re.findall(r"\d+", text)
             if nums:
                 result["reviews"] = int(nums[0])
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Failed to parse reviews: %s", e)
 
     return result
 
@@ -182,36 +200,6 @@ def get_firms_on_page(page) -> list[dict]:
     return firms
 
 
-def count_competitors(page, city_slug: str, category: str) -> dict:
-    """Count total competitors and those with websites in category+city."""
-    encoded_cat = quote(category)
-    url = f"{BASE_URL}/{city_slug}/search/{encoded_cat}"
-
-    try:
-        page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-
-        firms = get_firms_on_page(page)
-        total = len(firms)
-        with_site = 0
-
-        for firm in firms[:20]:  # Check first 20
-            try:
-                firm_url = f"{BASE_URL}/{city_slug}/firm/{firm['source_id']}"
-                page.goto(firm_url, timeout=10000, wait_until="domcontentloaded")
-                page.wait_for_timeout(1500)
-                if has_real_website(page):
-                    with_site += 1
-            except Exception:
-                pass
-            time.sleep(0.5)
-
-        return {"competitors_total": total, "competitors_with_site": with_site}
-    except Exception as e:
-        log.error("Failed to count competitors: %s", e)
-        return {"competitors_total": 0, "competitors_with_site": 0}
-
-
 def go_to_next_page(page, current_page: int) -> bool:
     next_page = str(current_page + 1)
     try:
@@ -227,7 +215,8 @@ def go_to_next_page(page, current_page: int) -> bool:
     return False
 
 
-def collect_from_search(page, city_slug: str, city_name: str, category: str, max_items: int) -> dict:
+def collect_from_search(page, city_slug: str, city_name: str, category: str,
+                        max_items: int, max_pages: int = 5) -> dict:
     encoded_cat = quote(category)
     url = f"{BASE_URL}/{city_slug}/search/{encoded_cat}"
     log.info("Opening: %s", url)
@@ -235,13 +224,21 @@ def collect_from_search(page, city_slug: str, city_name: str, category: str, max
     page.goto(url, timeout=30000, wait_until="domcontentloaded")
     page.wait_for_timeout(4000)
 
+    # Check for captcha/block
+    page_text = page.inner_text("body")[:500].lower() if page.query_selector("body") else ""
+    if "captcha" in page_text or "заблокирован" in page_text:
+        log.warning("Captcha or block detected on %s/%s", city_name, category)
+        return {"found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
+                "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
+                "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
+                "skipped_few_reviews": 0, "errors": 1}
+
     stats = {"found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
              "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
              "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
              "skipped_few_reviews": 0, "errors": 0}
 
     current_page = 1
-    max_pages = 5
 
     while current_page <= max_pages and stats["saved"] < max_items:
         firms = get_firms_on_page(page)
@@ -292,7 +289,6 @@ def collect_from_search(page, city_slug: str, city_name: str, category: str, max
                     stats["skipped_site"] += 1
                     continue
 
-            # Quality filters
             passed, reason = passes_quality_filters(
                 firm["name"], contacts["rating"], contacts["reviews"], bool(contacts["phone"])
             )
@@ -321,12 +317,10 @@ def collect_from_search(page, city_slug: str, city_name: str, category: str, max
 
             time.sleep(1.5)
 
+        # Navigate to next page directly instead of re-navigating from page 1
         if current_page < max_pages and stats["saved"] < max_items:
-            page.goto(url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            for p_num in range(1, current_page + 1):
-                if not go_to_next_page(page, p_num):
-                    return stats
+            if not go_to_next_page(page, current_page):
+                break
 
         current_page += 1
 
@@ -361,6 +355,7 @@ def run(config: dict):
     cities = config["cities"]
     categories = config["categories"]
     max_items = config.get("leads_per_category", 30)
+    max_pages = config.get("max_pages", 5)
     all_stats = []
 
     init_db()
@@ -377,7 +372,10 @@ def run(config: dict):
                 cat_name = cat if isinstance(cat, str) else cat["name"]
                 log.info("=== %s / %s ===", city["name"], cat_name)
                 try:
-                    stats = collect_from_search(page, city["slug"], city["name"], cat_name, max_items)
+                    stats = collect_from_search(
+                        page, city["slug"], city["name"], cat_name,
+                        max_items, max_pages,
+                    )
                     stats["city"] = city["name"]
                     stats["category"] = cat_name
                     all_stats.append(stats)
@@ -397,7 +395,6 @@ def run(config: dict):
 
     write_parser_log(all_stats)
 
-    # Export to shared JSON
     leads_path = os.path.join(SHARED_DIR, "leads.json")
     count = export_leads_json(leads_path)
     log.info("Exported %d leads to %s", count, leads_path)

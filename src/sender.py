@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import smtplib
 import ssl
 import logging
@@ -24,7 +25,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from telethon import TelegramClient, errors
-from telethon.tl.functions.contacts import ImportContactsRequest
+from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
 from telethon.tl.types import InputPhoneContact
 
 from db import init_db, record_outreach, get_connection
@@ -40,6 +41,7 @@ TOUCH_INTERVAL_DAYS = 3
 MAX_FIRST_TOUCH_PER_DAY = 50
 DELAY_MIN = 30
 DELAY_MAX = 60
+SMTP_TIMEOUT = 30
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,24 +50,40 @@ logging.basicConfig(
 logger = logging.getLogger("sender")
 
 
-# ---------------------------------------------------------------------------
-# Шаблоны сообщений для 3 касаний
-# ---------------------------------------------------------------------------
+def _is_valid_email(email: str) -> bool:
+    if not email or not isinstance(email, str):
+        return False
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+
+def _safe_int(value, default=0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(value, default=0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
 
 def get_touch_message(step: int, lead: dict, audit: dict) -> str:
-    """Возвращает текст сообщения для соответствующего касания."""
     name = lead.get("name", "компания")
-    city = lead.get("city", "")
-    category = lead.get("category", "")
-    monthly_loss = audit.get("monthly_loss", lead.get("monthly_loss", 0))
-    lost_clients_low = audit.get("lost_clients_low", lead.get("lost_clients_low", 0))
-    lost_clients_high = audit.get("lost_clients_high", lead.get("lost_clients_high", 0))
-    monthly_searches = audit.get("monthly_searches", lead.get("monthly_searches", 0))
-    competitors_with_site = audit.get("competitors_with_site", lead.get("competitors_with_site", 0))
+    monthly_loss = _safe_float(audit.get("monthly_loss") or lead.get("monthly_loss"))
+    lost_clients_low = _safe_int(audit.get("lost_clients_low") or lead.get("lost_clients_low"))
+    lost_clients_high = _safe_int(audit.get("lost_clients_high") or lead.get("lost_clients_high"))
+    monthly_searches = _safe_int(audit.get("monthly_searches") or lead.get("monthly_searches"))
+    competitors_with_site = _safe_int(audit.get("competitors_with_site") or lead.get("competitors_with_site"))
 
     if step == 1:
-        # Первое касание: используем message_text из аудита если есть,
-        # иначе стандартный шаблон
         custom_msg = audit.get("message_text", "")
         if custom_msg:
             return custom_msg
@@ -99,15 +117,16 @@ def get_touch_message(step: int, lead: dict, audit: dict) -> str:
     return ""
 
 
-def get_email_subject(lead: dict) -> str:
+def get_email_subject(lead: dict, step: int) -> str:
     name = lead.get("name", "компания")
     city = lead.get("city", "")
-    return f"Аудит цифрового присутствия — {name}, {city}"
+    if step == 1:
+        return f"Аудит цифрового присутствия — {name}, {city}"
+    elif step == 2:
+        return f"Напоминание: аудит для {name}"
+    else:
+        return f"Последнее сообщение — аудит {name}"
 
-
-# ---------------------------------------------------------------------------
-# Загрузка / сохранение outreach.json
-# ---------------------------------------------------------------------------
 
 def load_outreach() -> list[dict]:
     if not os.path.exists(OUTREACH_PATH):
@@ -130,31 +149,13 @@ def load_audits() -> list[dict]:
         return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# Лог sender-log.md
-# ---------------------------------------------------------------------------
-
 def append_log(line: str):
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(f"- [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {line}\n")
 
 
-# ---------------------------------------------------------------------------
-# Проверка: можно ли отправлять
-# ---------------------------------------------------------------------------
-
 def can_send(lead: dict, outreach_records: list[dict]) -> tuple[bool, int]:
-    """
-    Проверяет, можно ли отправить сообщение лиду.
-    Возвращает (можно, следующий_шаг).
-
-    Блокирует если:
-    - Лид ответил (replied=1)
-    - Достигнуто 3 касания
-    - Текущий шаг уже отправлен
-    - С последнего касания прошло менее 3 дней
-    """
     lead_id = lead.get("id")
 
     if lead.get("replied"):
@@ -190,23 +191,14 @@ def count_first_touches_today(outreach_records: list[dict]) -> int:
     )
 
 
-# ---------------------------------------------------------------------------
-# Telegram (Telethon)
-# ---------------------------------------------------------------------------
-
 async def send_telegram(client: TelegramClient, lead: dict, audit: dict, step: int) -> bool:
-    """
-    Отправляет сообщение + PDF через Telegram.
-    Ищет пользователя по номеру телефона через ImportContactsRequest.
-    Возвращает True при успехе.
-    """
     phone = lead.get("phone", "").strip()
     if not phone:
         logger.warning("Лид %s (%s): нет телефона для Telegram", lead["id"], lead.get("name"))
         return False
 
+    imported_user = None
     try:
-        # Импортируем контакт для поиска пользователя
         contact = InputPhoneContact(
             client_id=0,
             phone=phone,
@@ -221,12 +213,11 @@ async def send_telegram(client: TelegramClient, lead: dict, audit: dict, step: i
             return False
 
         user = result.users[0]
+        imported_user = user
         message_text = get_touch_message(step, lead, audit)
 
-        # Отправляем сообщение
         await client.send_message(user, message_text)
 
-        # Отправляем PDF если есть и это первое или второе касание
         pdf_path = audit.get("audit_pdf_path", "")
         if pdf_path and os.path.exists(pdf_path) and step <= 2:
             await client.send_file(
@@ -244,32 +235,29 @@ async def send_telegram(client: TelegramClient, lead: dict, audit: dict, step: i
     except Exception as e:
         logger.error("Telegram ошибка для лида %s: %s", lead.get("id"), e)
         return False
+    finally:
+        if imported_user:
+            try:
+                await client(DeleteContactsRequest(id=[imported_user]))
+            except Exception:
+                pass
 
-
-# ---------------------------------------------------------------------------
-# Email (SMTP)
-# ---------------------------------------------------------------------------
 
 def send_email(smtp_cfg: dict, lead: dict, audit: dict, step: int) -> bool:
-    """
-    Отправляет email с сообщением и PDF вложением.
-    Возвращает True при успехе.
-    """
     email_to = lead.get("email", "").strip()
-    if not email_to:
-        logger.warning("Лид %s (%s): нет email", lead["id"], lead.get("name"))
+    if not email_to or not _is_valid_email(email_to):
+        logger.warning("Лид %s (%s): невалидный email '%s'", lead["id"], lead.get("name"), email_to)
         return False
 
     try:
         msg = MIMEMultipart()
         msg["From"] = f"{smtp_cfg['from_name']} <{smtp_cfg['email']}>"
         msg["To"] = email_to
-        msg["Subject"] = get_email_subject(lead)
+        msg["Subject"] = get_email_subject(lead, step)
 
         body = get_touch_message(step, lead, audit)
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
-        # PDF вложение
         pdf_path = audit.get("audit_pdf_path", "")
         if pdf_path and os.path.exists(pdf_path) and step <= 2:
             with open(pdf_path, "rb") as f:
@@ -282,7 +270,8 @@ def send_email(smtp_cfg: dict, lead: dict, audit: dict, step: int) -> bool:
             msg.attach(pdf_attachment)
 
         context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(smtp_cfg["server"], smtp_cfg["port"], context=context) as server:
+        with smtplib.SMTP_SSL(smtp_cfg["server"], smtp_cfg["port"],
+                               context=context, timeout=SMTP_TIMEOUT) as server:
             server.login(smtp_cfg["email"], smtp_cfg["password"])
             server.sendmail(smtp_cfg["email"], email_to, msg.as_string())
 
@@ -294,15 +283,7 @@ def send_email(smtp_cfg: dict, lead: dict, audit: dict, step: int) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Основная логика рассылки
-# ---------------------------------------------------------------------------
-
 async def run(config: dict):
-    """
-    Основная функция рассылки.
-    Читает audits.json, проверяет каждого лида, отправляет Telegram > Email.
-    """
     init_db()
     append_log("Запуск sender")
 
@@ -314,129 +295,110 @@ async def run(config: dict):
 
     outreach_records = load_outreach()
 
-    # Подключаем Telegram клиент
     tg_cfg = config.get("telethon", {})
     tg_client = None
-    if tg_cfg.get("api_id") and tg_cfg.get("api_hash"):
-        session_path = os.path.join(PROJECT_ROOT, tg_cfg.get("session_name", "sender_session"))
-        tg_client = TelegramClient(session_path, tg_cfg["api_id"], tg_cfg["api_hash"])
-        await tg_client.start(phone=tg_cfg.get("phone"))
-        logger.info("Telegram клиент подключён.")
-    else:
-        logger.warning("Telegram не настроен — будет использоваться только Email.")
 
-    smtp_cfg = config.get("smtp", {})
-    smtp_available = all(
-        smtp_cfg.get(k) for k in ("server", "port", "email", "password", "from_name")
-    )
-    if not smtp_available:
-        logger.warning("SMTP не настроен — Email отправка недоступна.")
+    try:
+        if tg_cfg.get("api_id") and tg_cfg.get("api_hash"):
+            session_path = os.path.join(PROJECT_ROOT, tg_cfg.get("session_name", "sender_session"))
+            tg_client = TelegramClient(session_path, tg_cfg["api_id"], tg_cfg["api_hash"])
+            await tg_client.start(phone=tg_cfg.get("phone"))
+            logger.info("Telegram клиент подключён.")
+        else:
+            logger.warning("Telegram не настроен — будет использоваться только Email.")
 
-    # Загружаем лидов из БД для сопоставления с аудитами
-    conn = get_connection()
-    leads_rows = conn.execute("SELECT * FROM leads WHERE audit_generated = 1").fetchall()
-    conn.close()
-    leads_by_id = {row["id"]: dict(row) for row in leads_rows}
+        smtp_cfg = config.get("smtp", {})
+        smtp_available = all(
+            smtp_cfg.get(k) for k in ("server", "port", "email", "password", "from_name")
+        )
+        if not smtp_available:
+            logger.warning("SMTP не настроен — Email отправка недоступна.")
 
-    stats = {"telegram": 0, "email": 0, "skipped": 0, "errors": 0}
-    flood_stopped = False
+        with get_connection() as conn:
+            leads_rows = conn.execute("SELECT * FROM leads WHERE audit_generated = 1").fetchall()
+        leads_by_id = {row["id"]: dict(row) for row in leads_rows}
 
-    for audit in audits:
-        if flood_stopped:
-            break
+        stats = {"telegram": 0, "email": 0, "skipped": 0, "errors": 0}
+        flood_stopped = False
 
-        lead_id = audit.get("lead_id")
-        if not lead_id or lead_id not in leads_by_id:
-            logger.warning("Аудит без валидного lead_id: %s", lead_id)
-            stats["skipped"] += 1
-            continue
-
-        lead = leads_by_id[lead_id]
-
-        # Проверяем лимит первых касаний за сегодня
-        first_touches_today = count_first_touches_today(outreach_records)
-        if first_touches_today >= MAX_FIRST_TOUCH_PER_DAY:
-            logger.info("Достигнут лимит %d первых касаний за сегодня. Останавливаем.",
-                        MAX_FIRST_TOUCH_PER_DAY)
-            append_log(f"Лимит {MAX_FIRST_TOUCH_PER_DAY} первых касаний за день достигнут.")
-            break
-
-        ok, step = can_send(lead, outreach_records)
-        if not ok:
-            stats["skipped"] += 1
-            continue
-
-        sent = False
-        channel = None
-
-        # Приоритет 1: Telegram
-        if tg_client and lead.get("phone"):
-            try:
-                sent = await send_telegram(tg_client, lead, audit, step)
-                if sent:
-                    channel = "telegram"
-            except errors.FloodWaitError:
-                flood_stopped = True
-                append_log("FloodWaitError — рассылка остановлена.")
-                stats["errors"] += 1
+        for audit in audits:
+            if flood_stopped:
                 break
 
-        # Приоритет 2: Email
-        if not sent and smtp_available and lead.get("email"):
-            sent = send_email(smtp_cfg, lead, audit, step)
+            lead_id = audit.get("lead_id")
+            if not lead_id or lead_id not in leads_by_id:
+                logger.warning("Аудит без валидного lead_id: %s", lead_id)
+                stats["skipped"] += 1
+                continue
+
+            lead = leads_by_id[lead_id]
+
+            first_touches_today = count_first_touches_today(outreach_records)
+            if first_touches_today >= MAX_FIRST_TOUCH_PER_DAY:
+                logger.info("Достигнут лимит %d первых касаний за сегодня. Останавливаем.",
+                            MAX_FIRST_TOUCH_PER_DAY)
+                append_log(f"Лимит {MAX_FIRST_TOUCH_PER_DAY} первых касаний за день достигнут.")
+                break
+
+            ok, step = can_send(lead, outreach_records)
+            if not ok:
+                stats["skipped"] += 1
+                continue
+
+            sent = False
+            channel = None
+
+            if tg_client and lead.get("phone"):
+                try:
+                    sent = await send_telegram(tg_client, lead, audit, step)
+                    if sent:
+                        channel = "telegram"
+                except errors.FloodWaitError:
+                    flood_stopped = True
+                    record_outreach(lead_id, "telegram", step, "failed", error="flood_wait")
+                    outreach_records.append({
+                        "lead_id": lead_id, "name": lead.get("name"),
+                        "channel": "telegram", "step": step, "status": "failed",
+                        "sent_at": datetime.now().isoformat(), "error": "flood_wait",
+                    })
+                    append_log("FloodWaitError — рассылка остановлена.")
+                    stats["errors"] += 1
+                    break
+
+            if not sent and smtp_available and lead.get("email"):
+                sent = send_email(smtp_cfg, lead, audit, step)
+                if sent:
+                    channel = "email"
+
+            if sent and channel:
+                record_outreach(lead_id, channel, step, "delivered")
+                outreach_records.append({
+                    "lead_id": lead_id, "name": lead.get("name"),
+                    "channel": channel, "step": step, "status": "delivered",
+                    "sent_at": datetime.now().isoformat(),
+                })
+                stats[channel] += 1
+                append_log(f"Отправлено: {lead.get('name')} | {channel} | шаг {step}")
+            elif not sent:
+                record_outreach(lead_id, "none", step, "failed", error="no_channel_available")
+                outreach_records.append({
+                    "lead_id": lead_id, "name": lead.get("name"),
+                    "channel": "none", "step": step, "status": "failed",
+                    "sent_at": datetime.now().isoformat(), "error": "no_channel_available",
+                })
+                stats["errors"] += 1
+
             if sent:
-                channel = "email"
+                delay = random.randint(DELAY_MIN, DELAY_MAX)
+                logger.info("Пауза %d сек перед следующей отправкой...", delay)
+                await asyncio.sleep(delay)
 
-        # Записываем результат
-        if sent and channel:
-            status = "delivered"
-            record_outreach(lead_id, channel, step, status)
+        save_outreach(outreach_records)
 
-            outreach_entry = {
-                "lead_id": lead_id,
-                "name": lead.get("name"),
-                "channel": channel,
-                "step": step,
-                "status": status,
-                "sent_at": datetime.now().isoformat(),
-            }
-            outreach_records.append(outreach_entry)
+    finally:
+        if tg_client:
+            await tg_client.disconnect()
 
-            stats[channel] += 1
-            append_log(
-                f"Отправлено: {lead.get('name')} | {channel} | шаг {step}"
-            )
-        elif not sent:
-            # Не удалось отправить ни одним каналом
-            error_msg = "no_channel_available"
-            record_outreach(lead_id, "none", step, "failed", error=error_msg)
-
-            outreach_entry = {
-                "lead_id": lead_id,
-                "name": lead.get("name"),
-                "channel": "none",
-                "step": step,
-                "status": "failed",
-                "sent_at": datetime.now().isoformat(),
-                "error": error_msg,
-            }
-            outreach_records.append(outreach_entry)
-            stats["errors"] += 1
-
-        # Задержка между отправками (30–60 сек)
-        if sent:
-            delay = random.randint(DELAY_MIN, DELAY_MAX)
-            logger.info("Пауза %d сек перед следующей отправкой...", delay)
-            await asyncio.sleep(delay)
-
-    # Сохраняем outreach.json
-    save_outreach(outreach_records)
-
-    # Закрываем Telegram клиент
-    if tg_client:
-        await tg_client.disconnect()
-
-    # Итоговая статистика
     summary = (
         f"Итого: Telegram={stats['telegram']}, Email={stats['email']}, "
         f"Пропущено={stats['skipped']}, Ошибки={stats['errors']}"
@@ -447,10 +409,6 @@ async def run(config: dict):
 
     return stats
 
-
-# ---------------------------------------------------------------------------
-# Точка входа
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     config_path = os.path.join(PROJECT_ROOT, "config.json")

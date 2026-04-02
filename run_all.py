@@ -7,11 +7,12 @@ Runs the full pipeline sequentially:
   2. Initialize DB
   3. Parse leads from 2GIS
   4. Enrich leads with search/domain data
-  5. Generate AI audits (requires gemini_api_key)
+  5. Generate AI audits (requires Gemini API key)
   6. Send outreach via Telegram/Email (requires telethon credentials)
   7. Generate final report to agent-runtime/outputs/report.md
 """
 
+import asyncio
 import sys
 import os
 import json
@@ -19,15 +20,9 @@ import logging
 import traceback
 from datetime import datetime
 
-# ---------------------------------------------------------------------------
-# Path setup — allow imports from src/
-# ---------------------------------------------------------------------------
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 LOG_PATH = os.path.join(PROJECT_ROOT, "run_all.log")
 
 logging.basicConfig(
@@ -40,21 +35,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("run_all")
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.json")
 OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "agent-runtime", "outputs")
 REPORT_PATH = os.path.join(OUTPUTS_DIR, "report.md")
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-errors: list[str] = []
 
-
-def _placeholder(value: str | None) -> bool:
-    """Return True if a config value is missing or still a placeholder."""
+def _placeholder(value) -> bool:
     if value is None:
         return True
     v = str(value).strip()
@@ -68,15 +54,11 @@ def _banner(title: str):
     log.info(sep)
 
 
-# ===========================================================================
-# Main pipeline
-# ===========================================================================
 def main():
     started_at = datetime.now()
+    errors: list[str] = []
 
-    # ------------------------------------------------------------------
     # Step 1 — Load config
-    # ------------------------------------------------------------------
     _banner("Step 1/7: Loading config.json")
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -84,12 +66,12 @@ def main():
         log.info("Config loaded successfully (%d top-level keys)", len(config))
     except Exception as exc:
         log.error("FATAL: Cannot load config.json — %s", exc)
-        errors.append(f"Config load failed: {exc}")
         print("\nPipeline aborted: config.json is required.")
         return
 
     # Detect available credentials
-    has_gemini_key = not _placeholder(config.get("gemini_api_key"))
+    gemini_keys = config.get("gemini_api_keys", [])
+    has_gemini_key = bool(gemini_keys and not _placeholder(gemini_keys[0])) or not _placeholder(config.get("gemini_api_key"))
     telethon_cfg = config.get("telethon", {})
     has_telethon = (
         not _placeholder(telethon_cfg.get("api_id"))
@@ -102,14 +84,12 @@ def main():
         and not _placeholder(smtp_cfg.get("password"))
     )
 
-    log.info("Credentials: gemini_api_key=%s  telethon=%s  smtp=%s",
+    log.info("Credentials: gemini=%s  telethon=%s  smtp=%s",
              "OK" if has_gemini_key else "MISSING",
              "OK" if has_telethon else "MISSING",
              "OK" if has_smtp else "MISSING")
 
-    # ------------------------------------------------------------------
     # Step 2 — Initialize DB
-    # ------------------------------------------------------------------
     _banner("Step 2/7: Initializing database")
     try:
         from db import init_db, get_stats
@@ -118,97 +98,81 @@ def main():
         log.info("DB initialized. Current stats: %s", stats_before)
     except Exception as exc:
         log.error("FATAL: DB init failed — %s", exc)
-        errors.append(f"DB init failed: {exc}")
         traceback.print_exc()
         print("\nPipeline aborted: database is required.")
         return
 
-    # ------------------------------------------------------------------
     # Step 3 — Parser
-    # ------------------------------------------------------------------
     _banner("Step 3/7: Running parser (2GIS)")
+    parse_ok = False
     try:
         from parser import run as run_parser
         run_parser(config)
         stats_after_parse = get_stats()
-        parsed_count = stats_after_parse["total"]
-        new_parsed = parsed_count - stats_before["total"]
-        log.info("Parser done. Total leads: %d (new: %d)", parsed_count, new_parsed)
+        new_parsed = stats_after_parse["total"] - stats_before["total"]
+        log.info("Parser done. Total leads: %d (new: %d)", stats_after_parse["total"], new_parsed)
+        parse_ok = True
     except Exception as exc:
         log.error("Parser failed: %s", exc)
         errors.append(f"Parser error: {exc}")
         traceback.print_exc()
 
-    # ------------------------------------------------------------------
     # Step 4 — Enricher
-    # ------------------------------------------------------------------
     _banner("Step 4/7: Running enricher")
     try:
         from enricher import run as run_enricher
         run_enricher(config)
         stats_after_enrich = get_stats()
-        enriched_count = stats_after_enrich["enriched"]
-        new_enriched = enriched_count - stats_before["enriched"]
-        log.info("Enricher done. Total enriched: %d (new: %d)", enriched_count, new_enriched)
+        new_enriched = stats_after_enrich["enriched"] - stats_before["enriched"]
+        log.info("Enricher done. Total enriched: %d (new: %d)", stats_after_enrich["enriched"], new_enriched)
     except Exception as exc:
         log.error("Enricher failed: %s", exc)
         errors.append(f"Enricher error: {exc}")
         traceback.print_exc()
 
-    # ------------------------------------------------------------------
-    # Step 5 — Auditor (requires Claude API key)
-    # ------------------------------------------------------------------
+    # Step 5 — Auditor (requires Gemini API key)
     _banner("Step 5/7: Running auditor")
     if not has_gemini_key:
-        log.warning("SKIPPED: gemini_api_key is missing or placeholder. Set it in config.json to enable audits.")
+        log.warning("SKIPPED: Gemini API key is missing or placeholder.")
     else:
         try:
             from auditor import run as run_auditor
             run_auditor(config)
             stats_after_audit = get_stats()
-            audited_count = stats_after_audit["audited"]
-            new_audited = audited_count - stats_before["audited"]
-            log.info("Auditor done. Total audited: %d (new: %d)", audited_count, new_audited)
+            new_audited = stats_after_audit["audited"] - stats_before["audited"]
+            log.info("Auditor done. Total audited: %d (new: %d)", stats_after_audit["audited"], new_audited)
         except Exception as exc:
             log.error("Auditor failed: %s", exc)
             errors.append(f"Auditor error: {exc}")
             traceback.print_exc()
 
-    # ------------------------------------------------------------------
     # Step 6 — Sender (requires Telethon or SMTP credentials)
-    # ------------------------------------------------------------------
     _banner("Step 6/7: Running sender")
     if not has_telethon and not has_smtp:
-        log.warning("SKIPPED: No Telethon or SMTP credentials configured. Set them in config.json to enable sending.")
+        log.warning("SKIPPED: No Telethon or SMTP credentials configured.")
     else:
         try:
             from sender import run as run_sender
-            run_sender(config)
+            asyncio.run(run_sender(config))
             stats_after_send = get_stats()
-            sent_count = stats_after_send["sent"]
-            new_sent = sent_count - stats_before["sent"]
-            log.info("Sender done. Total sent: %d (new: %d)", sent_count, new_sent)
+            new_sent = stats_after_send["sent"] - stats_before["sent"]
+            log.info("Sender done. Total sent: %d (new: %d)", stats_after_send["sent"], new_sent)
         except Exception as exc:
             log.error("Sender failed: %s", exc)
             errors.append(f"Sender error: {exc}")
             traceback.print_exc()
 
-    # ------------------------------------------------------------------
     # Step 7 — Generate final report
-    # ------------------------------------------------------------------
     _banner("Step 7/7: Generating report")
     try:
         final_stats = get_stats()
-        _generate_report(config, stats_before, final_stats, started_at)
+        _generate_report(config, stats_before, final_stats, started_at, errors)
         log.info("Report saved to %s", REPORT_PATH)
     except Exception as exc:
         log.error("Report generation failed: %s", exc)
         errors.append(f"Report error: {exc}")
         traceback.print_exc()
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
     elapsed = datetime.now() - started_at
     _banner("Pipeline complete")
     log.info("Total time: %s", str(elapsed).split(".")[0])
@@ -220,11 +184,8 @@ def main():
         log.info("All steps completed successfully.")
 
 
-# ---------------------------------------------------------------------------
-# Report generator
-# ---------------------------------------------------------------------------
-def _generate_report(config: dict, stats_before: dict, stats_after: dict, started_at: datetime):
-    """Write a Markdown report to agent-runtime/outputs/report.md."""
+def _generate_report(config: dict, stats_before: dict, stats_after: dict,
+                     started_at: datetime, errors: list[str]):
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
     finished_at = datetime.now()
@@ -238,19 +199,17 @@ def _generate_report(config: dict, stats_before: dict, stats_after: dict, starte
     cities = [c["name"] for c in config.get("cities", [])]
     categories = config.get("categories", [])
 
-    # Try to count by channel from DB
     tg_sent = 0
     email_sent = 0
     try:
         from db import get_connection
-        conn = get_connection()
-        tg_sent = conn.execute(
-            "SELECT COUNT(*) FROM outreach WHERE channel = 'telegram' AND status = 'delivered'"
-        ).fetchone()[0]
-        email_sent = conn.execute(
-            "SELECT COUNT(*) FROM outreach WHERE channel = 'email' AND status = 'delivered'"
-        ).fetchone()[0]
-        conn.close()
+        with get_connection() as conn:
+            tg_sent = conn.execute(
+                "SELECT COUNT(*) FROM outreach WHERE channel = 'telegram' AND status = 'delivered'"
+            ).fetchone()[0]
+            email_sent = conn.execute(
+                "SELECT COUNT(*) FROM outreach WHERE channel = 'email' AND status = 'delivered'"
+            ).fetchone()[0]
     except Exception:
         pass
 
@@ -303,6 +262,5 @@ def _generate_report(config: dict, stats_before: dict, stats_after: dict, starte
         f.write(report)
 
 
-# ===========================================================================
 if __name__ == "__main__":
     main()
