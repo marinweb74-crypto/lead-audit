@@ -1,18 +1,14 @@
 """
-Parser: собирает компании из 2ГИС через Playwright.
+Parser: собирает компании из 2ГИС через Places API.
 Фильтрует: с сайтом, сетевые бренды, без контактов, дубли с blacklist.
 """
 
 import json
-import ipaddress
-import socket
 import time
 import logging
 import os
 import re
-import requests as http_requests
-from urllib.parse import quote
-from playwright.sync_api import sync_playwright
+import requests
 
 from db import init_db, save_lead, lead_exists, is_blacklisted, export_leads_json
 
@@ -31,12 +27,23 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-BASE_URL = "https://2gis.ru"
+API_URL = "https://catalog.api.2gis.com/3.0/items"
+
+# 2GIS region IDs
+REGION_IDS = {
+    "moscow": 32, "spb": 2, "novosibirsk": 1, "ekaterinburg": 7,
+    "kazan": 12, "nizhniy_novgorod": 22, "samara": 24, "chelyabinsk": 30,
+    "ufa": 28, "rostov-na-donu": 49, "krasnoyarsk": 14, "perm": 23,
+    "volgograd": 5, "krasnodar": 13, "saratov": 25, "tolyatti": 82,
+    "yaroslavl": 31, "irkutsk": 9, "habarovsk": 29, "vladivostok": 4,
+    "orenburg": 43, "tomsk": 27, "kemerovo": 11, "astrakhan": 124,
+    "naberezhnye_chelny": 83, "penza": 46, "lipetsk": 64, "kirov": 67,
+}
 
 IGNORE_DOMAINS = [
-    "2gis", "google", "yandex.ru/maps", "facebook.com", "instagram.com",
+    "2gis", "google", "yandex.ru", "facebook.com", "instagram.com",
     "vk.com", "t.me", "wa.me", "whatsapp.com", "youtube.com", "tiktok.com",
-    "otello.ru", "zoon.ru", "yell.ru", "flamp.ru", "tugis.ru",
+    "zoon.ru", "yell.ru", "flamp.ru",
 ]
 
 KNOWN_CHAINS = [
@@ -53,8 +60,8 @@ FREE_EMAIL_DOMAINS = [
     "list.ru", "rambler.ru", "hotmail.com", "outlook.com", "yahoo.com",
 ]
 
-MIN_RATING = 4.0
-MIN_REVIEWS = 5
+MIN_RATING = 3.5
+MIN_REVIEWS = 3
 
 SKIP_NAME_PATTERNS = [
     "частный", "частная", "мастер ", "ип ", "индивидуальный",
@@ -89,188 +96,124 @@ def is_known_chain(name: str) -> bool:
     return any(chain in name_lower for chain in KNOWN_CHAINS)
 
 
-def _is_valid_email(email: str) -> bool:
-    if not email or not isinstance(email, str):
-        return False
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email))
+def _extract_contacts(item: dict) -> dict:
+    """Extract phone, email, website from 2GIS API item."""
+    result = {"phone": "", "email": "", "has_website": False}
 
+    for group in item.get("contact_groups", []):
+        for contact in group.get("contacts", []):
+            ctype = contact.get("type", "")
+            value = contact.get("value", "")
 
-def has_own_domain_email(email: str) -> bool:
-    if not _is_valid_email(email):
-        return False
-    domain = email.split("@")[1].lower()
-    return domain not in FREE_EMAIL_DOMAINS
+            if ctype == "phone" and not result["phone"]:
+                # Clean phone: keep only digits and +
+                cleaned = re.sub(r"[^\d+]", "", value)
+                result["phone"] = cleaned
 
+            elif ctype == "email" and not result["email"]:
+                result["email"] = value.lower().strip()
 
-def _is_private_ip(hostname: str) -> bool:
-    """Check if hostname resolves to a private/reserved IP."""
-    try:
-        ip_str = socket.gethostbyname(hostname)
-        ip = ipaddress.ip_address(ip_str)
-        return ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local
-    except (socket.gaierror, ValueError):
-        return True
-
-
-def verify_website_by_email_domain(email: str) -> bool:
-    if not _is_valid_email(email):
-        return False
-    domain = email.split("@")[1].lower()
-    if domain in FREE_EMAIL_DOMAINS:
-        return False
-    if _is_private_ip(domain):
-        return False
-    try:
-        resp = http_requests.head(f"https://{domain}", timeout=5, allow_redirects=True)
-        return resp.status_code < 400
-    except Exception:
-        try:
-            resp = http_requests.head(f"http://{domain}", timeout=5, allow_redirects=True)
-            return resp.status_code < 400
-        except Exception:
-            return False
-
-
-def extract_source_id(href: str) -> str:
-    match = re.search(r"/firm/(\d+)", href)
-    return match.group(1) if match else ""
-
-
-def has_real_website(page) -> bool:
-    for link in page.query_selector_all("a[href]"):
-        href = link.get_attribute("href") or ""
-        if not href.startswith("http"):
-            continue
-        if any(domain in href for domain in IGNORE_DOMAINS):
-            continue
-        return True
-    return False
-
-
-def read_contacts(page) -> dict:
-    result = {"phone": "", "email": "", "has_website": False, "rating": None, "reviews": 0}
-
-    phone_links = page.query_selector_all('a[href^="tel:"]')
-    if phone_links:
-        result["phone"] = (phone_links[0].get_attribute("href") or "").replace("tel:", "")
-
-    email_links = page.query_selector_all('a[href^="mailto:"]')
-    if email_links:
-        result["email"] = (email_links[0].get_attribute("href") or "").replace("mailto:", "")
-
-    result["has_website"] = has_real_website(page)
-
-    try:
-        rating_el = page.query_selector('[class*="rating"] [class*="value"]')
-        if rating_el:
-            text = rating_el.inner_text().strip().replace(",", ".")
-            result["rating"] = float(text)
-    except Exception as e:
-        log.debug("Failed to parse rating: %s", e)
-
-    try:
-        review_el = page.query_selector('[class*="rating"] [class*="count"]')
-        if review_el:
-            text = review_el.inner_text().strip()
-            nums = re.findall(r"\d+", text)
-            if nums:
-                result["reviews"] = int(nums[0])
-    except Exception as e:
-        log.debug("Failed to parse reviews: %s", e)
+            elif ctype == "website":
+                url = value.lower()
+                if not any(d in url for d in IGNORE_DOMAINS):
+                    result["has_website"] = True
 
     return result
 
 
-def get_firms_on_page(page) -> list[dict]:
-    firm_links = page.query_selector_all('a[href*="/firm/"]')
-    firms = []
-    seen = set()
-    for link in firm_links:
-        href = link.get_attribute("href") or ""
-        sid = extract_source_id(href)
-        if sid and sid not in seen:
-            seen.add(sid)
-            name = ""
-            try:
-                name = link.inner_text().strip()
-            except Exception:
-                pass
-            firms.append({"source_id": sid, "name": name})
-    return firms
+def _extract_rating(item: dict) -> tuple:
+    """Extract rating and review count from 2GIS API item."""
+    reviews_data = item.get("reviews", {})
+    rating = reviews_data.get("general_rating")
+    review_count = reviews_data.get("general_review_count", 0)
+    return rating, review_count
 
 
-def go_to_next_page(page, current_page: int) -> bool:
-    next_page = str(current_page + 1)
+def _search_2gis(api_key: str, query: str, region_id: int,
+                 page: int = 1, page_size: int = 50) -> dict | None:
+    """Call 2GIS Places API."""
+    params = {
+        "key": api_key,
+        "q": query,
+        "region_id": region_id,
+        "type": "branch",
+        "page": page,
+        "page_size": page_size,
+        "fields": "items.contact_groups,items.reviews",
+        "sort": "relevance",
+    }
+
     try:
-        btn = page.query_selector(f'button:text-is("{next_page}")')
-        if not btn:
-            btn = page.query_selector(f'a:text-is("{next_page}")')
-        if btn:
-            btn.click()
-            page.wait_for_timeout(3000)
-            return True
-    except Exception as e:
-        log.error("Failed to go to page %s: %s", next_page, e)
-    return False
+        resp = requests.get(API_URL, params=params, timeout=15)
+        if resp.status_code == 403:
+            log.error("2GIS API: access denied (invalid or expired key)")
+            return None
+        if resp.status_code == 429:
+            log.warning("2GIS API: rate limited, waiting 5s...")
+            time.sleep(5)
+            resp = requests.get(API_URL, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        log.error("2GIS API request failed: %s", e)
+        return None
 
 
-def collect_from_search(page, city_slug: str, city_name: str, category: str,
-                        max_items: int, max_pages: int = 5) -> dict:
-    encoded_cat = quote(category)
-    url = f"{BASE_URL}/{city_slug}/search/{encoded_cat}"
-    log.info("Opening: %s", url)
-
-    page.goto(url, timeout=30000, wait_until="domcontentloaded")
-    page.wait_for_timeout(4000)
-
-    # Check for captcha/block
-    page_text = page.inner_text("body")[:500].lower() if page.query_selector("body") else ""
-    if "captcha" in page_text or "заблокирован" in page_text:
-        log.warning("Captcha or block detected on %s/%s", city_name, category)
-        return {"found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
-                "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
-                "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
-                "skipped_few_reviews": 0, "errors": 1}
+def collect_from_api(api_key: str, city_slug: str, city_name: str,
+                     category: str, max_items: int, max_pages: int = 10) -> dict:
+    """Collect leads from 2GIS API for a given city and category."""
+    region_id = REGION_IDS.get(city_slug)
+    if not region_id:
+        log.warning("Unknown city slug: %s — skipping", city_slug)
+        return _empty_stats()
 
     stats = {"found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
              "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
              "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
              "skipped_few_reviews": 0, "errors": 0}
 
-    current_page = 1
-
-    while current_page <= max_pages and stats["saved"] < max_items:
-        firms = get_firms_on_page(page)
-        log.info("Page %d: found %d firms", current_page, len(firms))
-
-        if not firms:
+    for page_num in range(1, max_pages + 1):
+        if stats["saved"] >= max_items:
             break
 
-        for firm in firms:
+        log.info("  API page %d for %s / %s...", page_num, city_name, category)
+        data = _search_2gis(api_key, category, region_id, page=page_num, page_size=50)
+
+        if not data:
+            stats["errors"] += 1
+            break
+
+        result = data.get("result", {})
+        items = result.get("items", [])
+
+        if not items:
+            log.info("  No more results on page %d", page_num)
+            break
+
+        total_available = result.get("total", 0)
+        log.info("  Page %d: %d items (total available: %d)", page_num, len(items), total_available)
+
+        for item in items:
             if stats["saved"] >= max_items:
                 break
 
             stats["found"] += 1
+            source_id = str(item.get("id", ""))
+            name = item.get("name", "").strip()
 
-            if is_blacklisted(firm["source_id"]):
-                stats["skipped_blacklist"] += 1
-                continue
-
-            if lead_exists(firm["source_id"]):
-                stats["skipped_dupe"] += 1
-                continue
-
-            try:
-                firm_url = f"{BASE_URL}/{city_slug}/firm/{firm['source_id']}"
-                page.goto(firm_url, timeout=15000, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
-            except Exception as e:
-                log.error("Failed to open %s: %s", firm["name"], e)
+            if not source_id or not name:
                 stats["errors"] += 1
                 continue
 
-            contacts = read_contacts(page)
+            if is_blacklisted(source_id):
+                stats["skipped_blacklist"] += 1
+                continue
+
+            if lead_exists(source_id):
+                stats["skipped_dupe"] += 1
+                continue
+
+            contacts = _extract_contacts(item)
 
             if contacts["has_website"]:
                 stats["skipped_site"] += 1
@@ -280,51 +223,47 @@ def collect_from_search(page, city_slug: str, city_name: str, category: str,
                 stats["skipped_no_contacts"] += 1
                 continue
 
-            if is_known_chain(firm["name"]):
+            if is_known_chain(name):
                 stats["skipped_chain"] += 1
                 continue
 
-            if contacts["email"] and has_own_domain_email(contacts["email"]):
-                if verify_website_by_email_domain(contacts["email"]):
-                    stats["skipped_site"] += 1
-                    continue
+            rating, review_count = _extract_rating(item)
 
             passed, reason = passes_quality_filters(
-                firm["name"], contacts["rating"], contacts["reviews"], bool(contacts["phone"])
+                name, rating, review_count, bool(contacts["phone"])
             )
             if not passed:
                 key = f"skipped_{reason}"
                 if key in stats:
                     stats[key] += 1
-                log.info("  Skipped (%s): %s | rating=%s reviews=%s",
-                         reason, firm["name"], contacts["rating"], contacts["reviews"])
                 continue
 
             saved = save_lead({
-                "name": firm["name"] or "Unknown",
+                "name": name,
                 "phone": contacts["phone"],
                 "email": contacts["email"],
                 "city": city_name,
                 "category": category,
-                "source_id": firm["source_id"],
-                "rating_2gis": contacts["rating"],
-                "reviews_2gis": contacts["reviews"],
+                "source_id": source_id,
+                "rating_2gis": rating,
+                "reviews_2gis": review_count,
             })
 
             if saved:
                 stats["saved"] += 1
-                log.info("NEW: %s | %s | %s | %s", firm["name"], contacts["phone"], city_name, category)
+                log.info("  NEW: %s | %s | %s | %s", name, contacts["phone"], city_name, category)
 
-            time.sleep(1.5)
-
-        # Navigate to next page directly instead of re-navigating from page 1
-        if current_page < max_pages and stats["saved"] < max_items:
-            if not go_to_next_page(page, current_page):
-                break
-
-        current_page += 1
+        # Small delay between pages
+        time.sleep(0.5)
 
     return stats
+
+
+def _empty_stats() -> dict:
+    return {"found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
+            "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
+            "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
+            "skipped_few_reviews": 0, "errors": 0}
 
 
 def write_parser_log(all_stats: list[dict]):
@@ -355,43 +294,38 @@ def run(config: dict):
     cities = config["cities"]
     categories = config["categories"]
     max_items = config.get("leads_per_category", 30)
-    max_pages = config.get("max_pages", 5)
-    all_stats = []
+    max_pages = config.get("max_pages", 10)
 
+    api_key = config.get("2gis_api_key", "")
+    if not api_key or api_key.startswith("YOUR_"):
+        log.error("2GIS API key not set in config.json (field: 2gis_api_key)")
+        return []
+
+    all_stats = []
     init_db()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        )
-
-        for city in cities:
-            for cat in categories:
-                cat_name = cat if isinstance(cat, str) else cat["name"]
-                log.info("=== %s / %s ===", city["name"], cat_name)
-                try:
-                    stats = collect_from_search(
-                        page, city["slug"], city["name"], cat_name,
-                        max_items, max_pages,
-                    )
-                    stats["city"] = city["name"]
-                    stats["category"] = cat_name
-                    all_stats.append(stats)
-                    log.info("Result: %d new from %s / %s", stats["saved"], city["name"], cat_name)
-                except Exception as e:
-                    log.error("Error %s/%s: %s", city["name"], cat_name, e)
-                    all_stats.append({
-                        "city": city["name"], "category": cat_name,
-                        "found": 0, "saved": 0, "skipped_site": 0, "skipped_chain": 0,
-                        "skipped_no_contacts": 0, "skipped_blacklist": 0, "skipped_dupe": 0,
-                        "skipped_no_phone": 0, "skipped_solo": 0, "skipped_low_rating": 0,
-                        "skipped_few_reviews": 0, "errors": 1,
-                    })
-                time.sleep(2)
-
-        browser.close()
+    for city in cities:
+        for cat in categories:
+            cat_name = cat if isinstance(cat, str) else cat["name"]
+            log.info("=== %s / %s ===", city["name"], cat_name)
+            try:
+                stats = collect_from_api(
+                    api_key, city["slug"], city["name"], cat_name,
+                    max_items, max_pages,
+                )
+                stats["city"] = city["name"]
+                stats["category"] = cat_name
+                all_stats.append(stats)
+                log.info("Result: saved=%d found=%d from %s / %s",
+                         stats["saved"], stats["found"], city["name"], cat_name)
+            except Exception as e:
+                log.error("Error %s/%s: %s", city["name"], cat_name, e)
+                empty = _empty_stats()
+                empty["city"] = city["name"]
+                empty["category"] = cat_name
+                empty["errors"] = 1
+                all_stats.append(empty)
+            time.sleep(1)
 
     write_parser_log(all_stats)
 

@@ -31,8 +31,6 @@ fi
 echo "Installing dependencies..."
 venv/bin/pip install -q --upgrade pip
 venv/bin/pip install -q -r requirements.txt
-venv/bin/python -m playwright install chromium
-venv/bin/python -m playwright install-deps
 
 # Config check
 if [ ! -f "config.json" ]; then

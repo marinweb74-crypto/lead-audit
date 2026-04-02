@@ -21,6 +21,7 @@
   "gemini_api_key": "YOUR_GEMINI_KEY",
   "gemini_model": "gemini-2.5-flash",
   "brave_search_api_key": "YOUR_BRAVE_KEY",
+  "2gis_api_key": "YOUR_2GIS_API_KEY",
   "cities": [
     {"slug": "moscow", "name": "Москва"},
     {"slug": "spb", "name": "Санкт-Петербург"},
@@ -59,7 +60,7 @@
     "Массаж"
   ],
   "leads_per_category": 30,
-  "max_pages": 5,
+  "max_pages": 10,
   "send_delay_min": 30,
   "send_delay_max": 60,
   "max_daily_sends": 50,
