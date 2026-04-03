@@ -165,7 +165,7 @@ def _fetch_contacts_from_html(city_slug: str, firm_id: str, session: requests.Se
 
 
 def _search_2gis(api_key: str, query: str, region_id: int,
-                 page: int = 1, page_size: int = 50) -> dict | None:
+                 page: int = 1, page_size: int = 10) -> dict | None:
     params = {
         "key": api_key,
         "q": query,
@@ -174,7 +174,6 @@ def _search_2gis(api_key: str, query: str, region_id: int,
         "page": page,
         "page_size": page_size,
         "fields": "items.reviews",
-        "sort": "relevance",
     }
 
     try:
@@ -209,7 +208,7 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
             break
 
         log.info("  API page %d for %s / %s...", page_num, city_name, category)
-        data = _search_2gis(api_key, category, region_id, page=page_num, page_size=50)
+        data = _search_2gis(api_key, category, region_id, page=page_num, page_size=10)
 
         if not data:
             stats["errors"] += 1
