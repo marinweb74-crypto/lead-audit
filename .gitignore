@@ -1,5 +1,6 @@
 config.json
 auth_session.py
+parser_progress.json
 *.session
 *.session-journal
 __pycache__/

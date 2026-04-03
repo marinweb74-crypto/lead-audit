@@ -103,7 +103,7 @@ async def cmd_parse(message: Message):
         await message.answer("Уже работает. /stop чтобы остановить.")
         return
 
-    await message.answer("Запускаю парсинг + обогащение + аудиты (50 лидов)...")
+    await message.answer("Запускаю парсинг + обогащение + аудиты (до 50 новых лидов)...")
     _current_task = asyncio.create_task(_run_parse(message))
 
 

@@ -337,11 +337,30 @@ def _is_peak_season(category: str) -> bool:
     return month in SEASON_PEAKS.get(category, [])
 
 
+PROGRESS_PATH = os.path.join(PROJECT_ROOT, "parser_progress.json")
+BATCH_LIMIT = 50
+
+
+def _load_progress() -> dict:
+    if os.path.exists(PROGRESS_PATH):
+        try:
+            with open(PROGRESS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"city_idx": 0, "cat_idx": 0}
+
+
+def _save_progress(city_idx: int, cat_idx: int):
+    with open(PROGRESS_PATH, "w", encoding="utf-8") as f:
+        json.dump({"city_idx": city_idx, "cat_idx": cat_idx}, f)
+
+
 def run(config: dict):
     cities = config["cities"]
     categories = config["categories"]
-    max_items = config.get("leads_per_category", 30)
     max_pages = config.get("max_pages", 10)
+    batch_limit = config.get("parse_batch_limit", BATCH_LIMIT)
 
     api_key = config.get("2gis_api_key", "")
     if not api_key or api_key.startswith("YOUR_"):
@@ -351,26 +370,48 @@ def run(config: dict):
     cat_names = [c if isinstance(c, str) else c["name"] for c in categories]
     cat_names.sort(key=lambda c: (0 if _is_peak_season(c) else 1))
 
+    progress = _load_progress()
+    start_city = progress.get("city_idx", 0)
+    start_cat = progress.get("cat_idx", 0)
+
     all_stats = []
     init_db()
+    total_saved = 0
 
-    for city in cities:
-        for cat_name in cat_names:
+    for ci in range(len(cities)):
+        city_idx = (start_city + ci) % len(cities)
+        city = cities[city_idx]
+
+        for cj in range(len(cat_names)):
+            if ci == 0:
+                cat_idx = (start_cat + cj) % len(cat_names)
+            else:
+                cat_idx = cj
+            cat_name = cat_names[cat_idx]
+
+            if total_saved >= batch_limit:
+                _save_progress(city_idx, cat_idx)
+                log.info("Batch limit %d reached, stopping. Resume next /parse", batch_limit)
+                break
+
+            remaining = batch_limit - total_saved
             is_peak = _is_peak_season(cat_name)
-            items_limit = int(max_items * SEASON_BOOST) if is_peak else max_items
             tag = " [PEAK SEASON]" if is_peak else ""
-            log.info("=== %s / %s%s (limit: %d) ===", city["name"], cat_name, tag, items_limit)
+            log.info("=== %s / %s%s (need %d more) ===", city["name"], cat_name, tag, remaining)
+
             try:
                 stats = collect_from_api(
                     api_key, city["slug"], city["name"], cat_name,
-                    items_limit, max_pages,
+                    remaining, max_pages,
                 )
                 stats["city"] = city["name"]
                 stats["category"] = cat_name
                 stats["peak_season"] = is_peak
                 all_stats.append(stats)
-                log.info("Result: saved=%d found=%d from %s / %s",
-                         stats["saved"], stats["found"], city["name"], cat_name)
+                total_saved += stats["saved"]
+                log.info("Result: saved=%d found=%d from %s / %s (total: %d/%d)",
+                         stats["saved"], stats["found"], city["name"], cat_name,
+                         total_saved, batch_limit)
             except Exception as e:
                 log.error("Error %s/%s: %s", city["name"], cat_name, e)
                 empty = _empty_stats()
@@ -379,12 +420,22 @@ def run(config: dict):
                 empty["errors"] = 1
                 all_stats.append(empty)
             time.sleep(1)
+        else:
+            continue
+        break
+
+    if total_saved >= batch_limit:
+        pass
+    else:
+        _save_progress(0, 0)
+        log.info("All cities/categories processed, resetting progress")
 
     write_parser_log(all_stats)
 
     leads_path = os.path.join(SHARED_DIR, "leads.json")
     count = export_leads_json(leads_path)
     log.info("Exported %d leads to %s", count, leads_path)
+    log.info("Batch done: %d new leads saved", total_saved)
 
     return all_stats
 
