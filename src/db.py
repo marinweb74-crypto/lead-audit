@@ -81,6 +81,13 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_outreach_lead_id ON outreach(lead_id);
             CREATE INDEX IF NOT EXISTS idx_leads_qualified ON leads(qualified);
         """)
+
+        # Auto-migrate: add 'qualified' column if DB was created before this update
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()]
+        if "qualified" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN qualified INTEGER DEFAULT 0")
+            logger.info("Migrated DB: added 'qualified' column")
+
         conn.commit()
 
 
