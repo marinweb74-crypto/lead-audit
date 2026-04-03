@@ -443,7 +443,7 @@ def _chart(cat: str) -> Drawing:
     for i, v in enumerate(data):
         x = i * (bw + gap) + 10
         bh = (v / mx) * 75
-        c = BAR_DARK if v >= 80 else (BAR_MED if v >= 50 else BAR_LIGHT)
+        c = HexColor("#2d8a4e") if v >= 80 else (HexColor("#f5a623") if v >= 50 else HexColor("#cc6666"))
         d.add(Rect(x, 18, bw, bh, fillColor=c, strokeColor=None))
         d.add(String(x+bw/2, 4, MO[i], fontSize=7, fontName=_FONT, textAnchor="middle", fillColor=MG))
         d.add(String(x+bw/2, 20+bh, f"{v}%", fontSize=6, fontName=_FONT, textAnchor="middle", fillColor=BK))
