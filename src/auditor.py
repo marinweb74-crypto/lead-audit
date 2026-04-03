@@ -293,7 +293,7 @@ def generate_pdf(lead: dict, audit_text: str, channel: str = "telegram") -> str:
         ParagraphStyle("C4", fontName=_FONT, fontSize=11, leading=14, alignment=TA_CENTER, textColor=MG, spaceAfter=40*mm)))
     s.append(Paragraph("Подготовлено командой STUN Agency",
         ParagraphStyle("C5", fontName=_FONT, fontSize=11, leading=14, alignment=TA_CENTER, textColor=MG, spaceAfter=2*mm)))
-    s.append(Paragraph("t.me/stun_agency",
+    s.append(Paragraph("stun.website",
         ParagraphStyle("C6", fontName=_FONT, fontSize=10, leading=13, alignment=TA_CENTER, textColor=LG)))
 
     # ==================== PAGE 2 — VISIBILITY ====================
@@ -394,6 +394,7 @@ def generate_pdf(lead: dict, audit_text: str, channel: str = "telegram") -> str:
     s.append(Spacer(1, 4*mm))
 
     ct = Table([
+        ["Сайт:", "stun.website"],
         ["Telegram:", "@stunagncy"],
         ["Канал:", "t.me/stun_agency"],
     ], colWidths=[28*mm, 80*mm])
@@ -415,7 +416,7 @@ def generate_pdf(lead: dict, audit_text: str, channel: str = "telegram") -> str:
     s.append(Paragraph(
         "Оценки основаны на открытых данных (2ГИС, поисковая выдача, Яндекс Вордстат) "
         "и могут отличаться от фактических показателей.", ss["FT"]))
-    s.append(Paragraph(f"STUN Agency  |  {now.strftime('%d.%m.%Y')}", ss["FT"]))
+    s.append(Paragraph(f"STUN Agency  |  stun.website  |  {now.strftime('%d.%m.%Y')}", ss["FT"]))
 
     doc.build(s)
     logger.info("PDF: %s", pdf_path)

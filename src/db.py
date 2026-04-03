@@ -57,6 +57,7 @@ def init_db():
                 collected_at TEXT NOT NULL,
                 enriched INTEGER DEFAULT 0,
                 audit_generated INTEGER DEFAULT 0,
+                qualified INTEGER DEFAULT 0,
                 sent_step INTEGER DEFAULT 0,
                 sent_channel TEXT,
                 replied INTEGER DEFAULT 0
@@ -78,6 +79,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_leads_sent_step ON leads(sent_step);
             CREATE INDEX IF NOT EXISTS idx_leads_replied ON leads(replied);
             CREATE INDEX IF NOT EXISTS idx_outreach_lead_id ON outreach(lead_id);
+            CREATE INDEX IF NOT EXISTS idx_leads_qualified ON leads(qualified);
         """)
         conn.commit()
 
@@ -117,14 +119,15 @@ def save_lead(data: dict) -> bool:
             conn.execute(
                 """INSERT OR IGNORE INTO leads
                    (name, phone, email, city, category, source_id,
-                    rating_2gis, reviews_2gis, collected_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rating_2gis, reviews_2gis, qualified, collected_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["name"],
                     data.get("phone") or None,
                     data.get("email") or None,
                     data["city"], data["category"], data["source_id"],
                     data.get("rating_2gis"), data.get("reviews_2gis", 0),
+                    data.get("qualified", 0),
                     datetime.now().isoformat(),
                 ),
             )
@@ -191,6 +194,7 @@ def get_leads_for_sending(limit: int = 50) -> list[dict]:
         rows = conn.execute(
             """SELECT * FROM leads
                WHERE audit_generated = 1 AND sent_step = 0 AND replied = 0
+               ORDER BY qualified DESC
                LIMIT ?""",
             (limit,),
         ).fetchall()
@@ -226,9 +230,10 @@ def get_stats() -> dict:
         audited = conn.execute("SELECT COUNT(*) FROM leads WHERE audit_generated = 1").fetchone()[0]
         sent = conn.execute("SELECT COUNT(*) FROM leads WHERE sent_step > 0").fetchone()[0]
         replied = conn.execute("SELECT COUNT(*) FROM leads WHERE replied = 1").fetchone()[0]
+        qualified = conn.execute("SELECT COUNT(*) FROM leads WHERE qualified = 1").fetchone()[0]
     return {
         "total": total, "enriched": enriched, "audited": audited,
-        "sent": sent, "replied": replied,
+        "sent": sent, "replied": replied, "qualified": qualified,
     }
 
 

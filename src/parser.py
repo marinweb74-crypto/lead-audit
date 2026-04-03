@@ -63,6 +63,20 @@ KNOWN_CHAINS = [
     "колесо.ру", "bianca", "youdo", "profi.ru", "профи.ру",
 ]
 
+SEASON_PEAKS = {
+    "Шиномонтаж":      [3, 4, 10, 11],
+    "Клининг":          [1, 3, 4, 12],
+    "Автосервис":       [3, 4, 9, 10],
+    "Ремонт телефонов": [9, 10, 12, 1],
+    "Массаж":           [10, 11, 12],
+    "Ателье":           [3, 4, 9, 10],
+    "Ремонт обуви":     [3, 4, 9, 10],
+    "Фотограф":         [5, 6, 9, 12],
+    "Грузоперевозки":   [5, 6, 7, 8, 9],
+}
+
+SEASON_BOOST = 1.5
+
 FREE_EMAIL_DOMAINS = [
     "gmail.com", "mail.ru", "yandex.ru", "ya.ru", "bk.ru", "inbox.ru",
     "list.ru", "rambler.ru", "hotmail.com", "outlook.com", "yahoo.com",
@@ -70,6 +84,8 @@ FREE_EMAIL_DOMAINS = [
 
 MIN_RATING = 3.5
 MIN_REVIEWS = 3
+QUALIFIED_MIN_RATING = 4.5
+QUALIFIED_MIN_REVIEWS = 20
 
 SKIP_NAME_PATTERNS = [
     "частный", "частная", "мастер ", "ип ", "индивидуальный",
@@ -258,6 +274,11 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
                 stats["skipped_no_contacts"] += 1
                 continue
 
+            is_qualified = (
+                (rating is not None and rating >= QUALIFIED_MIN_RATING)
+                and review_count >= QUALIFIED_MIN_REVIEWS
+            )
+
             saved = save_lead({
                 "name": name,
                 "phone": contacts["phone"],
@@ -267,6 +288,7 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
                 "source_id": source_id,
                 "rating_2gis": rating,
                 "reviews_2gis": review_count,
+                "qualified": 1 if is_qualified else 0,
             })
 
             if saved:
@@ -310,6 +332,12 @@ def write_parser_log(all_stats: list[dict]):
             f.write(f"- Errors: {s['errors']}\n\n")
 
 
+def _is_peak_season(category: str) -> bool:
+    from datetime import datetime
+    month = datetime.now().month
+    return month in SEASON_PEAKS.get(category, [])
+
+
 def run(config: dict):
     cities = config["cities"]
     categories = config["categories"]
@@ -321,20 +349,26 @@ def run(config: dict):
         log.error("2GIS API key not set in config.json (field: 2gis_api_key)")
         return []
 
+    cat_names = [c if isinstance(c, str) else c["name"] for c in categories]
+    cat_names.sort(key=lambda c: (0 if _is_peak_season(c) else 1))
+
     all_stats = []
     init_db()
 
     for city in cities:
-        for cat in categories:
-            cat_name = cat if isinstance(cat, str) else cat["name"]
-            log.info("=== %s / %s ===", city["name"], cat_name)
+        for cat_name in cat_names:
+            is_peak = _is_peak_season(cat_name)
+            items_limit = int(max_items * SEASON_BOOST) if is_peak else max_items
+            tag = " [PEAK SEASON]" if is_peak else ""
+            log.info("=== %s / %s%s (limit: %d) ===", city["name"], cat_name, tag, items_limit)
             try:
                 stats = collect_from_api(
                     api_key, city["slug"], city["name"], cat_name,
-                    max_items, max_pages,
+                    items_limit, max_pages,
                 )
                 stats["city"] = city["name"]
                 stats["category"] = cat_name
+                stats["peak_season"] = is_peak
                 all_stats.append(stats)
                 log.info("Result: saved=%d found=%d from %s / %s",
                          stats["saved"], stats["found"], city["name"], cat_name)
