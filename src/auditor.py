@@ -199,32 +199,40 @@ def _build_prompt(lead: dict) -> str:
 
 def generate_audit_text(api_key, model: str, lead: dict) -> str:
     prompt = _build_prompt(lead)
-    keys = api_key if isinstance(api_key, list) else [api_key]
-    for i, key in enumerate(keys):
-        for attempt in range(MAX_RETRIES):
-            try:
-                resp = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
-                    headers={"Content-Type": "application/json", "x-goog-api-key": key},
-                    timeout=90,
-                )
-                resp.raise_for_status()
-                return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            except requests.exceptions.HTTPError as e:
-                st = e.response.status_code if e.response is not None else 0
-                if st == 429 and i < len(keys) - 1:
-                    logger.warning("Key %d: 429, next key", i+1); break
-                if st >= 500 and attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF ** attempt); continue
-                raise
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF ** attempt); continue
-                raise
-        else: continue
-        continue
-    raise RuntimeError("All API keys exhausted")
+    key = api_key if isinstance(api_key, str) else api_key[0]
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                json={
+                    "model": model,
+                    "max_tokens": 2048,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                },
+                timeout=90,
+            )
+            resp.raise_for_status()
+            return resp.json()["content"][0]["text"]
+        except requests.exceptions.HTTPError as e:
+            st = e.response.status_code if e.response is not None else 0
+            if st == 429 and attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF ** attempt
+                logger.warning("Claude 429, retry in %ds", wait)
+                time.sleep(wait); continue
+            if st >= 500 and attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF ** attempt); continue
+            raise
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF ** attempt); continue
+            raise
+    raise RuntimeError("Claude API failed after retries")
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +490,10 @@ def _append_log(lead, path):
 
 def run(config: dict):
     init_db()
-    api_keys = config.get("gemini_api_keys", [])
-    api_key = api_keys if api_keys else config.get("gemini_api_key", "")
-    if not api_key or (isinstance(api_key, str) and api_key.startswith("YOUR_")):
-        logger.error("Gemini API key not set"); return
-    model = config.get("gemini_model", "gemini-2.5-flash")
+    api_key = config.get("anthropic_api_key", "")
+    if not api_key or api_key.startswith("YOUR_"):
+        logger.error("Anthropic API key not set in config.json"); return
+    model = config.get("anthropic_model", "claude-haiku-4-20250414")
     leads = get_leads_for_audit()
     if not leads: logger.info("No leads for audit"); return
     logger.info("%d leads for audit", len(leads))

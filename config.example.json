@@ -14,12 +14,8 @@
     "password": "YOUR_APP_PASSWORD",
     "from_name": "STUN Agency"
   },
-  "gemini_api_keys": [
-    "YOUR_GEMINI_KEY_1",
-    "YOUR_GEMINI_KEY_2"
-  ],
-  "gemini_api_key": "YOUR_GEMINI_KEY",
-  "gemini_model": "gemini-2.5-flash",
+  "anthropic_api_key": "YOUR_ANTHROPIC_KEY",
+  "anthropic_model": "claude-haiku-4-20250414",
   "brave_search_api_key": "YOUR_BRAVE_KEY",
   "2gis_api_key": "YOUR_2GIS_API_KEY",
   "cities": [
