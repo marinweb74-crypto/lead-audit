@@ -1,3 +1,4 @@
+config.json
 auth_session.py
 *.session
 *.session-journal
