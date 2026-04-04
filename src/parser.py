@@ -127,6 +127,25 @@ def _extract_rating(item: dict) -> tuple:
     return rating, review_count
 
 
+def _has_website_from_api(item: dict) -> bool:
+    """Check if 2GIS API item contains a real website link."""
+    # Check links field
+    links = item.get("links", [])
+    if isinstance(links, list):
+        for link in links:
+            url = link.get("value", "") or link.get("url", "") or ""
+            if url and not any(d in url.lower() for d in IGNORE_DOMAINS):
+                return True
+    # Check external_content
+    ext = item.get("external_content", [])
+    if isinstance(ext, list):
+        for e in ext:
+            url = e.get("url", "") or e.get("value", "") or ""
+            if url and not any(d in url.lower() for d in IGNORE_DOMAINS):
+                return True
+    return False
+
+
 def _fetch_contacts_from_html(city_slug: str, firm_id: str, session: requests.Session) -> dict:
     """Fetch phone, email, website from 2GIS firm page HTML."""
     result = {"phone": "", "email": "", "has_website": False}
@@ -148,14 +167,36 @@ def _fetch_contacts_from_html(city_slug: str, firm_id: str, session: requests.Se
         if emails:
             result["email"] = emails[0].lower().strip()
 
-        # Check for real website links (not aggregators)
+        # Multiple patterns to catch website links
+        all_urls = set()
+
+        # Pattern 1: explicit website class/data-testid
         site_pattern = r'href="(https?://[^"]+)"[^>]*(?:class="[^"]*website|data-testid="[^"]*website)'
-        sites = re.findall(site_pattern, html)
-        if not sites:
-            sites = re.findall(r'"website":\s*"(https?://[^"]+)"', html)
-        for site_url in sites:
+        all_urls.update(re.findall(site_pattern, html))
+
+        # Pattern 2: JSON "website" field
+        all_urls.update(re.findall(r'"website":\s*"(https?://[^"]+)"', html))
+
+        # Pattern 3: "url" field in JSON context near website
+        all_urls.update(re.findall(r'"type":\s*"website"[^}]*"value":\s*"(https?://[^"]+)"', html))
+        all_urls.update(re.findall(r'"value":\s*"(https?://[^"]+)"[^}]*"type":\s*"website"', html))
+
+        # Pattern 4: links with "site" or "website" nearby
+        all_urls.update(re.findall(r'(?:site|website|сайт)[^"]*"(https?://[^"]+)"', html, re.IGNORECASE))
+        all_urls.update(re.findall(r'"(https?://[^"]+)"[^"]*(?:site|website|сайт)', html, re.IGNORECASE))
+
+        # Pattern 5: any href that looks like a business website (has its own domain)
+        hrefs = re.findall(r'href="(https?://[^"]+)"', html)
+        for h in hrefs:
+            if not any(d in h.lower() for d in IGNORE_DOMAINS):
+                # Skip if it's a 2GIS internal link or common non-business URL
+                if '/firm/' not in h and '/geo/' not in h and 'catalog' not in h:
+                    all_urls.add(h)
+
+        for site_url in all_urls:
             if not any(d in site_url.lower() for d in IGNORE_DOMAINS):
                 result["has_website"] = True
+                log.debug("Found website for %s: %s", firm_id, site_url)
                 break
 
     except Exception as e:
@@ -173,7 +214,7 @@ def _search_2gis(api_key: str, query: str, region_id: int,
         "type": "branch",
         "page": page,
         "page_size": page_size,
-        "fields": "items.reviews",
+        "fields": "items.reviews,items.links,items.external_content",
     }
 
     try:
@@ -261,12 +302,19 @@ def collect_from_api(api_key: str, city_slug: str, city_name: str,
                 stats["skipped_solo"] += 1
                 continue
 
+            # Check website from API first (fast)
+            if _has_website_from_api(item):
+                stats["skipped_site"] += 1
+                log.debug("Skipped %s: has website (API)", name)
+                continue
+
             # Fetch contacts from HTML page
             contacts = _fetch_contacts_from_html(city_slug, source_id, session)
             time.sleep(0.3)
 
             if contacts["has_website"]:
                 stats["skipped_site"] += 1
+                log.debug("Skipped %s: has website (HTML)", name)
                 continue
 
             if not contacts["phone"] and not contacts["email"]:
