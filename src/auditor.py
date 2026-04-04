@@ -197,9 +197,16 @@ def _build_prompt(lead: dict) -> str:
     """)
 
 
-def generate_audit_text(api_key, model: str, lead: dict) -> str:
+def generate_audit_text(api_key, model: str, lead: dict, proxy: dict | None = None) -> str:
     prompt = _build_prompt(lead)
     key = api_key if isinstance(api_key, str) else api_key[0]
+    proxies = None
+    if proxy:
+        auth = ""
+        if proxy.get("user") and proxy.get("password"):
+            auth = f"{proxy['user']}:{proxy['password']}@"
+        proxy_url = f"http://{auth}{proxy['host']}:{proxy['port']}"
+        proxies = {"https": proxy_url, "http": proxy_url}
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -216,6 +223,7 @@ def generate_audit_text(api_key, model: str, lead: dict) -> str:
                     "anthropic-version": "2023-06-01",
                 },
                 timeout=90,
+                proxies=proxies,
             )
             resp.raise_for_status()
             return resp.json()["content"][0]["text"]
@@ -494,6 +502,7 @@ def run(config: dict):
     if not api_key or api_key.startswith("YOUR_"):
         logger.error("Anthropic API key not set in config.json"); return
     model = config.get("anthropic_model", "claude-haiku-4-5-20251001")
+    proxy = config.get("proxy")
     leads = get_leads_for_audit()
     if not leads: logger.info("No leads for audit"); return
     logger.info("%d leads for audit", len(leads))
@@ -503,7 +512,7 @@ def run(config: dict):
         lid = lead["id"]; nm = lead.get("name", "???")
         logger.info("[%d/%d] %s", done+1, len(leads), nm)
         try:
-            txt = generate_audit_text(api_key, model, lead)
+            txt = generate_audit_text(api_key, model, lead, proxy=proxy)
             pdf = generate_pdf(lead, txt)
             openers = [
                 f"Добрый день. Мы — команда STUN Agency, занимаемся созданием сайтов для бизнеса.",
