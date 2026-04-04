@@ -7,10 +7,10 @@ with open(config_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
 
 cfg["proxy"] = {
-    "host": "168.0.212.20",
-    "port": 9539,
-    "user": "47dxkm",
-    "password": "coL1y8"
+    "host": "186.179.49.80",
+    "port": 8000,
+    "user": "2ELq33",
+    "password": "p77deh"
 }
 
 with open(config_path, "w", encoding="utf-8") as f:

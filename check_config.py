@@ -16,6 +16,16 @@ print("anthropic_model:", model)
 if key == "MISSING" or key.startswith("YOUR_"):
     print("ERROR: no anthropic key in config!")
 else:
+    proxy_cfg = cfg.get("proxy")
+    proxies = None
+    if proxy_cfg:
+        auth = ""
+        if proxy_cfg.get("user"):
+            auth = f"{proxy_cfg['user']}:{proxy_cfg['password']}@"
+        proxy_url = f"http://{auth}{proxy_cfg['host']}:{proxy_cfg['port']}"
+        proxies = {"https": proxy_url, "http": proxy_url}
+        print("Using proxy:", proxy_cfg["host"], proxy_cfg["port"])
+
     print("\nTesting Claude API...")
     try:
         resp = requests.post(
@@ -23,6 +33,7 @@ else:
             json={"model": model, "max_tokens": 50, "messages": [{"role": "user", "content": "Say hello in Russian"}]},
             headers={"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"},
             timeout=30,
+            proxies=proxies,
         )
         print("Status:", resp.status_code)
         if resp.status_code == 200:
