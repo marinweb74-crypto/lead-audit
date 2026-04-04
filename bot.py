@@ -103,7 +103,7 @@ async def cmd_parse(message: Message):
         await message.answer("Уже работает. /stop чтобы остановить.")
         return
 
-    await message.answer("Запускаю парсинг + обогащение + аудиты (до 50 новых лидов)...")
+    await message.answer("Запускаю парсинг + обогащение + проверка TG + аудиты (до 50 новых лидов)...")
     _current_task = asyncio.create_task(_run_parse(message))
 
 
@@ -120,14 +120,24 @@ async def _run_parse(message: Message):
         new = stats_after["total"] - stats_before["total"]
         await message.answer(f"Парсинг завершён. Новых лидов: {new}")
 
-        await message.answer("2/3 Обогащение данных...")
+        await message.answer("2/4 Обогащение данных...")
         from enricher import run as run_enricher
         await loop.run_in_executor(None, run_enricher, CONFIG)
 
         stats_after = get_stats()
         await message.answer(f"Обогащение завершено. Обогащено: {stats_after['enriched']}")
 
-        await message.answer("3/3 Генерация аудитов...")
+        await message.answer("3/4 Проверка Telegram...")
+        from tg_checker import check_leads
+        tg_stats = await check_leads(CONFIG)
+        await message.answer(
+            f"Проверка завершена.\n"
+            f"Проверено: {tg_stats['checked']}\n"
+            f"Есть TG: {tg_stats['has_tg']}\n"
+            f"Нет TG: {tg_stats['no_tg']}"
+        )
+
+        await message.answer("4/4 Генерация аудитов (только для лидов с TG или email)...")
         from auditor import run as run_auditor
         await loop.run_in_executor(None, run_auditor, CONFIG)
 

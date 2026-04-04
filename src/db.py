@@ -58,6 +58,8 @@ def init_db():
                 enriched INTEGER DEFAULT 0,
                 audit_generated INTEGER DEFAULT 0,
                 qualified INTEGER DEFAULT 0,
+                has_telegram INTEGER DEFAULT 0,
+                tg_checked INTEGER DEFAULT 0,
                 sent_step INTEGER DEFAULT 0,
                 sent_channel TEXT,
                 replied INTEGER DEFAULT 0
@@ -82,11 +84,16 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_leads_qualified ON leads(qualified);
         """)
 
-        # Auto-migrate: add 'qualified' column if DB was created before this update
         cols = [r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()]
         if "qualified" not in cols:
             conn.execute("ALTER TABLE leads ADD COLUMN qualified INTEGER DEFAULT 0")
             logger.info("Migrated DB: added 'qualified' column")
+        if "has_telegram" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN has_telegram INTEGER DEFAULT 0")
+            logger.info("Migrated DB: added 'has_telegram' column")
+        if "tg_checked" not in cols:
+            conn.execute("ALTER TABLE leads ADD COLUMN tg_checked INTEGER DEFAULT 0")
+            logger.info("Migrated DB: added 'tg_checked' column")
 
         conn.commit()
 
@@ -181,10 +188,31 @@ def update_lead_enrichment(source_id: str, enrichment: dict):
         conn.commit()
 
 
+def get_leads_for_tg_check(limit: int = 200) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM leads WHERE enriched = 1 AND tg_checked = 0 AND phone IS NOT NULL AND phone != '' LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_tg_checked(lead_id: int, has_telegram: bool):
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE leads SET tg_checked = 1, has_telegram = ? WHERE id = ?",
+            (1 if has_telegram else 0, lead_id),
+        )
+        conn.commit()
+
+
 def get_leads_for_audit(limit: int = 100) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM leads WHERE enriched = 1 AND audit_generated = 0 LIMIT ?",
+            """SELECT * FROM leads
+               WHERE enriched = 1 AND audit_generated = 0 AND tg_checked = 1
+               AND (has_telegram = 1 OR (email IS NOT NULL AND email != ''))
+               LIMIT ?""",
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
