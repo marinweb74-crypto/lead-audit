@@ -128,14 +128,18 @@ async def _run_parse(message: Message):
         await message.answer(f"Обогащение завершено. Обогащено: {stats_after['enriched']}")
 
         await message.answer("3/4 Проверка Telegram...")
-        from tg_checker import check_leads
-        tg_stats = await check_leads(CONFIG)
-        await message.answer(
-            f"Проверка завершена.\n"
-            f"Проверено: {tg_stats['checked']}\n"
-            f"Есть TG: {tg_stats['has_tg']}\n"
-            f"Нет TG: {tg_stats['no_tg']}"
-        )
+        try:
+            from tg_checker import check_leads
+            tg_stats = await check_leads(CONFIG)
+            await message.answer(
+                f"Проверка завершена.\n"
+                f"Проверено: {tg_stats['checked']}\n"
+                f"Есть TG: {tg_stats['has_tg']}\n"
+                f"Нет TG: {tg_stats['no_tg']}"
+            )
+        except Exception as e:
+            await message.answer(f"Ошибка проверки TG: {e}. Продолжаю с аудитами...")
+            log.exception("TG check error")
 
         await message.answer("4/4 Генерация аудитов (только для лидов с TG или email)...")
         from auditor import run as run_auditor

@@ -185,14 +185,6 @@ def _fetch_contacts_from_html(city_slug: str, firm_id: str, session: requests.Se
         all_urls.update(re.findall(r'(?:site|website|сайт)[^"]*"(https?://[^"]+)"', html, re.IGNORECASE))
         all_urls.update(re.findall(r'"(https?://[^"]+)"[^"]*(?:site|website|сайт)', html, re.IGNORECASE))
 
-        # Pattern 5: any href that looks like a business website (has its own domain)
-        hrefs = re.findall(r'href="(https?://[^"]+)"', html)
-        for h in hrefs:
-            if not any(d in h.lower() for d in IGNORE_DOMAINS):
-                # Skip if it's a 2GIS internal link or common non-business URL
-                if '/firm/' not in h and '/geo/' not in h and 'catalog' not in h:
-                    all_urls.add(h)
-
         for site_url in all_urls:
             if not any(d in site_url.lower() for d in IGNORE_DOMAINS):
                 result["has_website"] = True

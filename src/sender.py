@@ -348,7 +348,7 @@ async def run(config: dict):
             sent = False
             channel = None
 
-            if tg_client and lead.get("phone"):
+            if tg_client and lead.get("phone") and lead.get("has_telegram", 1):
                 try:
                     sent = await send_telegram(tg_client, lead, audit, step)
                     if sent:

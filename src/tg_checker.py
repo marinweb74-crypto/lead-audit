@@ -32,6 +32,14 @@ async def check_leads(config: dict) -> dict:
     client = TelegramClient(session_path, tg_cfg["api_id"], tg_cfg["api_hash"])
     await client.start(phone=tg_cfg.get("phone"))
 
+    # Auto-mark email-only leads (no phone) as checked
+    from db import get_connection
+    with get_connection() as conn:
+        conn.execute("""UPDATE leads SET tg_checked=1, has_telegram=0
+                        WHERE enriched=1 AND tg_checked=0
+                        AND (phone IS NULL OR phone='')""")
+        conn.commit()
+
     leads = get_leads_for_tg_check()
     if not leads:
         logger.info("No leads to check")
@@ -75,9 +83,8 @@ async def check_leads(config: dict) -> dict:
 
         except Exception as e:
             logger.error("Error checking %s: %s", lead.get("name"), e)
-            mark_tg_checked(lead["id"], False)
-            stats["checked"] += 1
-            stats["no_tg"] += 1
+            # Don't mark as checked — leave for retry next run
+            continue
 
         await asyncio.sleep(DELAY)
 
