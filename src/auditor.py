@@ -493,7 +493,7 @@ def run(config: dict):
     api_key = config.get("anthropic_api_key", "")
     if not api_key or api_key.startswith("YOUR_"):
         logger.error("Anthropic API key not set in config.json"); return
-    model = config.get("anthropic_model", "claude-haiku-4-20250414")
+    model = config.get("anthropic_model", "claude-haiku-4-5-20251001")
     leads = get_leads_for_audit()
     if not leads: logger.info("No leads for audit"); return
     logger.info("%d leads for audit", len(leads))
