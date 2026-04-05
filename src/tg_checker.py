@@ -57,6 +57,14 @@ async def check_leads(config: dict) -> dict:
             stats["no_tg"] += 1
             continue
 
+        # Normalize phone: 8XXX → +7XXX, 7XXX → +7XXX
+        if phone.startswith("8") and len(phone) == 11:
+            phone = "+7" + phone[1:]
+        elif phone.startswith("7") and len(phone) == 11:
+            phone = "+" + phone
+        elif not phone.startswith("+"):
+            phone = "+" + phone
+
         try:
             contact = InputPhoneContact(
                 client_id=0,

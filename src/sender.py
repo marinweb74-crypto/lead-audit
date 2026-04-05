@@ -197,6 +197,14 @@ async def send_telegram(client: TelegramClient, lead: dict, audit: dict, step: i
         logger.warning("Лид %s (%s): нет телефона для Telegram", lead["id"], lead.get("name"))
         return False
 
+    # Normalize phone format
+    if phone.startswith("8") and len(phone) == 11:
+        phone = "+7" + phone[1:]
+    elif phone.startswith("7") and len(phone) == 11:
+        phone = "+" + phone
+    elif not phone.startswith("+"):
+        phone = "+" + phone
+
     imported_user = None
     try:
         contact = InputPhoneContact(
